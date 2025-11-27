@@ -272,6 +272,8 @@ class RasterValueVectorizer:
                 'unique_values': [],
                 'ranges_table': [],
                 'id_to_label_map': {},
+                'id_to_min_map': {},
+                'id_to_max_map': {},
                 'calc_area_m2': calc_area_m2,
                 'calc_area_ha': calc_area_ha,
                 'temp_dir': current_temp_dir
@@ -305,6 +307,8 @@ class RasterValueVectorizer:
                         
                         internal_id = current_id
                         params['id_to_label_map'][internal_id] = raw_cls_val
+                        params['id_to_min_map'][internal_id] = min_val
+                        params['id_to_max_map'][internal_id] = max_val
                         current_id += 1
                         
                         params['ranges_table'].extend([min_val, max_val, internal_id])
@@ -413,6 +417,8 @@ class RasterValueVectorizer:
                         # Add labeling step if needed (Ranges method)
                         if params['method_idx'] == 1 and params['id_to_label_map']:
                             steps.append('labels')
+                            steps.append('min_max')
+                            steps.append('range_label')
                         
                         if params['calc_area_m2']: steps.append('m2')
                         if params['calc_area_ha']: steps.append('ha')
@@ -467,7 +473,76 @@ class RasterValueVectorizer:
                                     'OUTPUT': step_output
                                 }, context=context, feedback=feedback)
                                 current_input_vector = step_output
+
+                            elif step == 'min_max':
+                                QgsMessageLog.logMessage(f"Agregando min/max a: {step_output}", "RasterValueVectorizer", Qgis.Info)
+                                # We need two fields, but field calculator does one at a time.
+                                # To avoid creating too many intermediate files, we can run field calculator twice on the same file?
+                                # No, field calculator creates a new file.
+                                # So we need to split this step or accept more intermediate files.
+                                # Let's do min first, then max. But wait, I added 'min_max' as one step in the list.
+                                # I should have added 'min_val' and 'max_val' separately to the list.
+                                # But to keep the list clean, I'll handle the intermediate file internally here.
                                 
+                                # 1. Min Value
+                                temp_min = os.path.join(params['temp_dir'], f'temp_min_{uuid.uuid4().hex}.gpkg')
+                                expression_parts_min = ["CASE"]
+                                for c_id, val in params['id_to_min_map'].items():
+                                    expression_parts_min.append(f"WHEN \"class_id\" = {c_id} THEN {val}")
+                                expression_parts_min.append("END")
+                                expression_min = " ".join(expression_parts_min)
+                                
+                                processing.run("native:fieldcalculator", {
+                                    'INPUT': current_input_vector,
+                                    'FIELD_NAME': 'min_value',
+                                    'FIELD_TYPE': 0, # Float
+                                    'FIELD_LENGTH': 20,
+                                    'FIELD_PRECISION': 6,
+                                    'FORMULA': expression_min,
+                                    'OUTPUT': temp_min
+                                }, context=context, feedback=feedback)
+                                
+                                # 2. Max Value (output to step_output)
+                                expression_parts_max = ["CASE"]
+                                for c_id, val in params['id_to_max_map'].items():
+                                    expression_parts_max.append(f"WHEN \"class_id\" = {c_id} THEN {val}")
+                                expression_parts_max.append("END")
+                                expression_max = " ".join(expression_parts_max)
+                                
+                                processing.run("native:fieldcalculator", {
+                                    'INPUT': temp_min,
+                                    'FIELD_NAME': 'max_value',
+                                    'FIELD_TYPE': 0, # Float
+                                    'FIELD_LENGTH': 20,
+                                    'FIELD_PRECISION': 6,
+                                    'FORMULA': expression_max,
+                                    'OUTPUT': step_output
+                                }, context=context, feedback=feedback)
+                                
+                                # Clean up temp_min
+                                try: os.remove(temp_min)
+                                except: pass
+                                
+                                current_input_vector = step_output
+
+                            elif step == 'range_label':
+                                QgsMessageLog.logMessage(f"Agregando range_label a: {step_output}", "RasterValueVectorizer", Qgis.Info)
+                                # Concatenate min and max
+                                # "min_value" || ' to ' || "max_value"
+                                # But we might want to format them nicely?
+                                # For now, simple concatenation is what was asked: "valor minimo 'to' valor maximo"
+                                
+                                processing.run("native:fieldcalculator", {
+                                    'INPUT': current_input_vector,
+                                    'FIELD_NAME': 'rango',
+                                    'FIELD_TYPE': 2, # String
+                                    'FIELD_LENGTH': 255,
+                                    'FIELD_PRECISION': 0,
+                                    'FORMULA': ' "min_value" || \' to \' || "max_value" ',
+                                    'OUTPUT': step_output
+                                }, context=context, feedback=feedback)
+                                current_input_vector = step_output
+
                             elif step == 'm2':
                                 QgsMessageLog.logMessage(f"Calculando área m2 a: {step_output}", "RasterValueVectorizer", Qgis.Info)
                                 processing.run("native:fieldcalculator", {
