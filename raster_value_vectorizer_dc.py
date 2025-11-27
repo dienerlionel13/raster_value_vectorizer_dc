@@ -185,6 +185,8 @@ class RasterValueVectorizer:
         
         # Import processing and UI elements here to avoid circular dependencies or loading issues
         import tempfile
+        import shutil
+        import uuid
         from qgis import processing
         from qgis.core import (QgsProject, Qgis, QgsVectorLayer, QgsField, QgsFeature, 
                              QgsTask, QgsApplication, QgsProcessingFeedback, QgsProcessingContext, 
@@ -232,11 +234,15 @@ class RasterValueVectorizer:
                 self.iface.messageBar().pushMessage("Error", "Seleccionó usar máscara pero no eligió ninguna capa.", level=Qgis.Critical)
                 return
 
+            # Create a dedicated temp directory for this run to avoid path issues
+            # We use mkdtemp to ensure it exists and is writable
+            current_temp_dir = tempfile.mkdtemp(prefix="raster_vectorizer_")
+
             # Prepare inputs for thread (ensure they are files)
             layer_source = layer.source()
             if not os.path.isfile(layer_source):
                 self.iface.messageBar().pushMessage("Info", "Preparando capa raster para procesamiento...", level=Qgis.Info)
-                temp_raster = os.path.join(tempfile.gettempdir(), 'input_raster_temp.tif')
+                temp_raster = os.path.join(current_temp_dir, 'input_raster.tif')
                 processing.run("gdal:translate", {
                     'INPUT': layer,
                     'OUTPUT': temp_raster
@@ -248,7 +254,7 @@ class RasterValueVectorizer:
                 mask_source = mask_layer.source()
                 if not os.path.isfile(mask_source):
                     self.iface.messageBar().pushMessage("Info", "Preparando máscara para procesamiento...", level=Qgis.Info)
-                    temp_mask = os.path.join(tempfile.gettempdir(), 'mask_temp.gpkg')
+                    temp_mask = os.path.join(current_temp_dir, 'mask.gpkg')
                     processing.run("native:savefeatures", {
                         'INPUT': mask_layer,
                         'OUTPUT': temp_mask
@@ -268,7 +274,7 @@ class RasterValueVectorizer:
                 'id_to_label_map': {},
                 'calc_area_m2': calc_area_m2,
                 'calc_area_ha': calc_area_ha,
-                'temp_dir': tempfile.gettempdir()
+                'temp_dir': current_temp_dir
             }
 
             if method_idx == 0: # Unique Values
@@ -310,7 +316,6 @@ class RasterValueVectorizer:
             def run_vectorization(task, params):
                 from qgis import processing
                 from qgis.core import QgsCoordinateReferenceSystem, QgsProcessingContext, QgsProcessingFeedback
-                import uuid
                 
                 # Custom feedback class to update task progress
                 class TaskFeedback(QgsProcessingFeedback):
@@ -327,6 +332,8 @@ class RasterValueVectorizer:
                 try:
                     feedback = TaskFeedback(task)
                     context = QgsProcessingContext()
+                    # Set project instance to ensure ellipsoidal area calculation if available
+                    context.setProject(QgsProject.instance())
                     
                     task.setProgress(0)
                     QgsMessageLog.logMessage("Iniciando proceso de vectorización...", "RasterValueVectorizer", Qgis.Info)
@@ -384,50 +391,110 @@ class RasterValueVectorizer:
                         }
                         processing.run("native:reclassifybytable", reclass_params, context=context, feedback=feedback)
 
-                        # Vectorize
-                        current_output_file = ""
+                        # Logic to chain operations and avoid overwriting files in place
+                        # 1. Polygonize -> Temp1
+                        # 2. Calc M2 -> Temp2 (or Final)
+                        # 3. Calc Ha -> Final
+                        
+                        # Determine the final destination
+                        final_output_path = ""
                         if params['is_temp']:
-                             current_output_file = os.path.join(params['temp_dir'], f'vectorized_{suffix}_{uuid.uuid4().hex}.shp')
+                             final_output_path = os.path.join(params['temp_dir'], f'vectorized_{suffix}_{uuid.uuid4().hex}.gpkg')
                         else:
                              base, ext = os.path.splitext(params['output_file_base'])
                              if suffix:
-                                 current_output_file = f"{base}{suffix}{ext}"
+                                 final_output_path = f"{base}{suffix}.gpkg"
                              else:
-                                 current_output_file = f"{base}{ext}"
+                                 final_output_path = f"{base}.gpkg"
+                             final_output_path = os.path.normpath(final_output_path)
 
-                        poly_params = {
-                            'INPUT': temp_processed,
-                            'BAND': 1,
-                            'FIELD': 'class_id',
-                            'EIGHT_CONNECTEDNESS': False,
-                            'OUTPUT': current_output_file
-                        }
-                        processing.run("gdal:polygonize", poly_params, context=context, feedback=feedback)
+                        # Determine intermediate steps
+                        steps = ['polygonize']
+                        # Add labeling step if needed (Ranges method)
+                        if params['method_idx'] == 1 and params['id_to_label_map']:
+                            steps.append('labels')
                         
-                        # Area Calculation
-                        if params['calc_area_m2']:
-                            processing.run("native:fieldcalculator", {
-                                'INPUT': current_output_file,
-                                'FIELD_NAME': 'area_m2',
-                                'FIELD_TYPE': 0, # Float
-                                'FIELD_LENGTH': 20,
-                                'FIELD_PRECISION': 4,
-                                'FORMULA': '$area',
-                                'OUTPUT': current_output_file # Overwrite
-                            }, context=context, feedback=feedback)
+                        if params['calc_area_m2']: steps.append('m2')
+                        if params['calc_area_ha']: steps.append('ha')
+                        
+                        current_input_vector = None
+                        
+                        for i, step in enumerate(steps):
+                            is_last_step = (i == len(steps) - 1)
                             
-                        if params['calc_area_ha']:
-                            processing.run("native:fieldcalculator", {
-                                'INPUT': current_output_file,
-                                'FIELD_NAME': 'area_ha',
-                                'FIELD_TYPE': 0, # Float
-                                'FIELD_LENGTH': 20,
-                                'FIELD_PRECISION': 4,
-                                'FORMULA': '$area / 10000',
-                                'OUTPUT': current_output_file # Overwrite
-                            }, context=context, feedback=feedback)
+                            # Output for this step
+                            if is_last_step:
+                                step_output = final_output_path
+                            else:
+                                step_output = os.path.join(params['temp_dir'], f'step_{step}_{uuid.uuid4().hex}.gpkg')
+                            
+                            # Delete if exists (crucial for the final step if overwriting user file)
+                            if os.path.exists(step_output):
+                                try:
+                                    os.remove(step_output)
+                                except:
+                                    pass
+                                    
+                            if step == 'polygonize':
+                                QgsMessageLog.logMessage(f"Vectorizando a: {step_output}", "RasterValueVectorizer", Qgis.Info)
+                                poly_params = {
+                                    'INPUT': temp_processed,
+                                    'BAND': 1,
+                                    'FIELD': 'class_id',
+                                    'EIGHT_CONNECTEDNESS': False,
+                                    'OUTPUT': step_output
+                                }
+                                processing.run("gdal:polygonize", poly_params, context=context, feedback=feedback)
+                                current_input_vector = step_output
 
-                        return current_output_file
+                            elif step == 'labels':
+                                QgsMessageLog.logMessage(f"Aplicando etiquetas a: {step_output}", "RasterValueVectorizer", Qgis.Info)
+                                # Construct CASE WHEN expression
+                                expression_parts = ["CASE"]
+                                for c_id, label in params['id_to_label_map'].items():
+                                    safe_label = str(label).replace("'", "''")
+                                    expression_parts.append(f"WHEN \"class_id\" = {c_id} THEN '{safe_label}'")
+                                expression_parts.append("END")
+                                expression = " ".join(expression_parts)
+
+                                processing.run("native:fieldcalculator", {
+                                    'INPUT': current_input_vector,
+                                    'FIELD_NAME': 'etiqueta',
+                                    'FIELD_TYPE': 2, # String
+                                    'FIELD_LENGTH': 255,
+                                    'FIELD_PRECISION': 0,
+                                    'FORMULA': expression,
+                                    'OUTPUT': step_output
+                                }, context=context, feedback=feedback)
+                                current_input_vector = step_output
+                                
+                            elif step == 'm2':
+                                QgsMessageLog.logMessage(f"Calculando área m2 a: {step_output}", "RasterValueVectorizer", Qgis.Info)
+                                processing.run("native:fieldcalculator", {
+                                    'INPUT': current_input_vector,
+                                    'FIELD_NAME': 'area_m2',
+                                    'FIELD_TYPE': 0, # Float
+                                    'FIELD_LENGTH': 20,
+                                    'FIELD_PRECISION': 6, # Increased precision
+                                    'FORMULA': '$area',
+                                    'OUTPUT': step_output
+                                }, context=context, feedback=feedback)
+                                current_input_vector = step_output
+                                
+                            elif step == 'ha':
+                                QgsMessageLog.logMessage(f"Calculando área ha a: {step_output}", "RasterValueVectorizer", Qgis.Info)
+                                processing.run("native:fieldcalculator", {
+                                    'INPUT': current_input_vector,
+                                    'FIELD_NAME': 'area_ha',
+                                    'FIELD_TYPE': 0, # Float
+                                    'FIELD_LENGTH': 20,
+                                    'FIELD_PRECISION': 4, # Precision 4
+                                    'FORMULA': '$area / 10000',
+                                    'OUTPUT': step_output
+                                }, context=context, feedback=feedback)
+                                current_input_vector = step_output
+
+                        return final_output_path
 
                     # Execution Loop
                     if params['method_idx'] == 0: # Unique Values
@@ -474,37 +541,29 @@ class RasterValueVectorizer:
                                 final_layer = self.iface.addVectorLayer(path, name, "ogr")
                                 if final_layer and final_layer.isValid():
                                     loaded_count += 1
-                                    # Apply labels for ranges if needed
-                                    if params['method_idx'] == 1 and params['id_to_label_map']:
-                                        final_layer.startEditing()
-                                        field_name = 'etiqueta'
-                                        final_layer.dataProvider().addAttributes([QgsField(field_name, QVariant.String)])
-                                        final_layer.updateFields()
-                                        
-                                        field_idx = final_layer.fields().indexOf(field_name)
-                                        class_id_idx = final_layer.fields().indexOf('class_id')
-                                        
-                                        if class_id_idx != -1:
-                                            for feature in final_layer.getFeatures():
-                                                c_id = feature.attributes()[class_id_idx]
-                                                if c_id in params['id_to_label_map']:
-                                                    label = params['id_to_label_map'][c_id]
-                                                    final_layer.changeAttributeValue(feature.id(), field_idx, label)
-                                        final_layer.commitChanges()
-                                        final_layer.triggerRepaint()
                         except Exception as e:
                              QgsMessageLog.logMessage(f"Error cargando capa {res['name']}: {str(e)}", "RasterValueVectorizer", Qgis.Warning)
 
                     if loaded_count > 0:
                         QMessageBox.information(self.iface.mainWindow(), "Éxito", f"Proceso completado. Se cargaron {loaded_count} capas.")
                     else:
-                        QMessageBox.warning(self.iface.mainWindow(), "Advertencia", "El proceso terminó pero no se cargaron capas (posiblemente vacías).")
+                        QMessageBox.warning(self.iface.mainWindow(), "Advertencia", "El proceso terminó pero no se cargaron capas.")
                 else:
                     QMessageBox.warning(self.iface.mainWindow(), "Aviso", "El proceso terminó sin resultados.")
+                
+                # Clean up the temporary directory ONLY if we are NOT using it for the final result
+                if not params['is_temp'] and os.path.exists(params['temp_dir']):
+                    try:
+                        shutil.rmtree(params['temp_dir'])
+                    except:
+                        pass # Best effort
 
             # Create and start the task
-            task = QgsTask.fromFunction("Vectorizando Raster", run_vectorization, on_finished=on_finished, params=params)
-            QgsApplication.taskManager().addTask(task)
-            self.iface.messageBar().pushMessage("Info", "Procesamiento iniciado en segundo plano. Espere...", level=Qgis.Info)
-
+            # Create and start the task
+            try:
+                task = QgsTask.fromFunction("Vectorizando Raster", run_vectorization, on_finished=on_finished, params=params)
+                QgsApplication.taskManager().addTask(task)
+                self.iface.messageBar().pushMessage("Info", "Procesamiento iniciado en segundo plano. Espere...", level=Qgis.Info)
+            except Exception as e:
+                QMessageBox.critical(self.iface.mainWindow(), "Error", f"No se pudo iniciar la tarea: {str(e)}")
 
