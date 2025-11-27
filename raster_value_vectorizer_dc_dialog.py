@@ -35,6 +35,10 @@ class RasterValueVectorizerDialog(QtWidgets.QDialog, FORM_CLASS):
         self.mButtonBrowse.clicked.connect(self.select_output_file)
         self.mCheckBoxTemp.toggled.connect(self.toggle_output_file)
         
+        # Mask attributes logic
+        self.mCheckBoxCopyAttributes.toggled.connect(self.toggle_mask_attributes)
+        self.mMapLayerComboBoxMask.currentIndexChanged.connect(self.populate_mask_attributes)
+        
         # Populate raster layers
         self.populate_layers()
 
@@ -47,12 +51,32 @@ class RasterValueVectorizerDialog(QtWidgets.QDialog, FORM_CLASS):
                 self.mMapLayerComboBox.addItem(layer.name(), layer)
             elif isinstance(layer, QgsVectorLayer) and layer.geometryType() == 2: # 2 = Polygon
                 self.mMapLayerComboBoxMask.addItem(layer.name(), layer)
-
     def toggle_output_file(self, checked):
         self.mLineEditOutput.setEnabled(not checked)
         self.mButtonBrowse.setEnabled(not checked)
         if checked:
             self.mLineEditOutput.clear()
+
+    def toggle_mask_attributes(self, checked):
+        self.mListWidgetAttributes.setEnabled(checked)
+        if checked:
+            self.populate_mask_attributes()
+        else:
+            self.mListWidgetAttributes.clear()
+
+    def populate_mask_attributes(self):
+        self.mListWidgetAttributes.clear()
+        if not self.mCheckBoxCopyAttributes.isChecked():
+            return
+            
+        layer = self.mMapLayerComboBoxMask.currentData()
+        if layer and isinstance(layer, QgsVectorLayer):
+            fields = layer.fields()
+            for field in fields:
+                item = QtWidgets.QListWidgetItem(field.name())
+                item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+                item.setCheckState(Qt.Unchecked)
+                self.mListWidgetAttributes.addItem(item)
 
     def add_range_row(self):
         row_count = self.mTableWidgetRanges.rowCount()

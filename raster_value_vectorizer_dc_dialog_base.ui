@@ -46,6 +46,23 @@
       <item>
        <widget class="QComboBox" name="mMapLayerComboBoxMask"/>
       </item>
+      <item>
+       <widget class="QCheckBox" name="mCheckBoxCopyAttributes">
+        <property name="text">
+         <string>Copiar atributos de la máscara al resultado</string>
+        </property>
+       </widget>
+      </item>
+      <item>
+       <widget class="QListWidget" name="mListWidgetAttributes">
+        <property name="selectionMode">
+         <enum>QAbstractItemView::MultiSelection</enum>
+        </property>
+        <property name="enabled">
+         <bool>false</bool>
+        </property>
+       </widget>
+      </item>
      </layout>
     </widget>
    </item>

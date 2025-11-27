@@ -221,6 +221,14 @@ class RasterValueVectorizer:
             calc_area_m2 = self.dlg.mCheckBoxAreaM2.isChecked()
             calc_area_ha = self.dlg.mCheckBoxAreaHa.isChecked()
 
+            # Capture selected attributes
+            selected_attributes = []
+            if self.dlg.mCheckBoxCopyAttributes.isChecked():
+                for i in range(self.dlg.mListWidgetAttributes.count()):
+                    item = self.dlg.mListWidgetAttributes.item(i)
+                    if item.checkState() == Qt.Checked:
+                        selected_attributes.append(item.text())
+
             # Validation
             if not layer:
                 self.iface.messageBar().pushMessage("Error", "Por favor seleccione una capa raster.", level=Qgis.Critical)
@@ -276,6 +284,7 @@ class RasterValueVectorizer:
                 'id_to_max_map': {},
                 'calc_area_m2': calc_area_m2,
                 'calc_area_ha': calc_area_ha,
+                'selected_attributes': selected_attributes,
                 'temp_dir': current_temp_dir
             }
 
@@ -451,6 +460,7 @@ class RasterValueVectorizer:
                         
                         if params['calc_area_m2']: steps.append('m2')
                         if params['calc_area_ha']: steps.append('ha')
+                        if params['selected_attributes']: steps.append('join_attributes')
                         
                         current_input_vector = None
                         
@@ -629,6 +639,20 @@ class RasterValueVectorizer:
                                     'FIELD_LENGTH': 20,
                                     'FIELD_PRECISION': 4, # Precision 4
                                     'FORMULA': '$area / 10000',
+                                    'OUTPUT': step_output
+                                }, context=context, feedback=feedback)
+                                current_input_vector = step_output
+
+                            elif step == 'join_attributes':
+                                QgsMessageLog.logMessage(f"Uniendo atributos de máscara a: {step_output}", "RasterValueVectorizer", Qgis.Info)
+                                processing.run("native:joinattributesbylocation", {
+                                    'INPUT': current_input_vector,
+                                    'JOIN': params['mask_source'],
+                                    'PREDICATE': [0], # Intersects
+                                    'JOIN_FIELDS': params['selected_attributes'],
+                                    'METHOD': 1, # Take attributes of the first matching feature
+                                    'DISCARD_NONMATCHING': False,
+                                    'PREFIX': '',
                                     'OUTPUT': step_output
                                 }, context=context, feedback=feedback)
                                 current_input_vector = step_output
