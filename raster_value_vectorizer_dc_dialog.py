@@ -3,6 +3,7 @@ import json
 
 from qgis.PyQt import uic
 from qgis.PyQt import QtWidgets
+from qgis.PyQt.QtCore import Qt
 from qgis.core import QgsProject, QgsRasterLayer, QgsVectorLayer
 
 # This loads your .ui file so that PyQt can populate your plugin with the elements from Qt Designer
@@ -69,10 +70,40 @@ class RasterValueVectorizerDialog(QtWidgets.QDialog, FORM_CLASS):
                 
     def add_unique_value(self):
         val = self.mSpinBoxUniqueToAdd.value()
-        # Check if already exists
-        items = [self.mListWidgetUnique.item(i).text() for i in range(self.mListWidgetUnique.count())]
-        if str(val) not in items:
-            self.mListWidgetUnique.addItem(str(val))
+        
+        # Ask for label
+        label, ok = QtWidgets.QInputDialog.getText(self, "Etiqueta", f"Ingrese etiqueta para el valor {val}:")
+        if not ok:
+            return # Cancelled
+            
+        if not label:
+            label = "Valor Unico" # Default
+
+        # Ask for tolerance/range
+        tol, ok = QtWidgets.QInputDialog.getDouble(self, "Rango Adicional", 
+            f"Ingrese rango adicional para {val} (0 para exacto).\nEjemplo: 0.01 para cubrir {val} hasta {val + 0.01}:", 
+            value=0.0, decimals=6)
+        if not ok:
+            return # Cancelled
+            
+        # Check if already exists (check values stored in UserRole)
+        exists = False
+        for i in range(self.mListWidgetUnique.count()):
+            item = self.mListWidgetUnique.item(i)
+            item_data = item.data(Qt.UserRole)
+            if item_data and item_data['val'] == val:
+                exists = True
+                break
+        
+        if not exists:
+            display_text = f"{val} ({label})"
+            if tol > 0:
+                display_text += f" [+{tol}]"
+                
+            item = QtWidgets.QListWidgetItem(display_text)
+            # Store data as dict
+            item.setData(Qt.UserRole, {'val': val, 'label': label, 'tol': tol})
+            self.mListWidgetUnique.addItem(item)
             
     def remove_unique_value(self):
         current_row = self.mListWidgetUnique.currentRow()

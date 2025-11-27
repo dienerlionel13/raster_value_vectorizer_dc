@@ -286,11 +286,26 @@ class RasterValueVectorizer:
                     self.iface.messageBar().pushMessage("Error", "Agregue al menos un valor único a la lista.", level=Qgis.Critical)
                     return
                 for i in range(count):
-                    try:
-                        val = float(self.dlg.mListWidgetUnique.item(i).text())
-                        params['unique_values'].append(val)
-                    except ValueError:
-                        pass
+                    item = self.dlg.mListWidgetUnique.item(i)
+                    data = item.data(Qt.UserRole)
+                    
+                    if data and isinstance(data, dict):
+                        params['unique_values'].append(data)
+                    else:
+                        # Fallback for items added before this change (if any) or plain text
+                        try:
+                            # Try to parse from text "val (label)" or just "val"
+                            txt = item.text()
+                            if "(" in txt and txt.endswith(")"):
+                                val_str = txt.split("(")[0].strip()
+                                label = txt.split("(")[1].strip(")")
+                                val = float(val_str)
+                                params['unique_values'].append({'val': val, 'label': label, 'tol': 0.0})
+                            else:
+                                val = float(txt)
+                                params['unique_values'].append({'val': val, 'label': 'Valor Unico', 'tol': 0.0})
+                        except ValueError:
+                            pass
             
             else: # Ranges
                 rows = self.dlg.mTableWidgetRanges.rowCount()
@@ -371,15 +386,26 @@ class RasterValueVectorizer:
                     output_layers = []
 
                     # Helper to process one item
-                    def process_one(target_val=None, ranges_table=None, suffix=""):
+                    def process_one(target_val=None, target_label="Valor Unico", target_tol=0.0, ranges_table=None, suffix=""):
                         temp_processed = os.path.join(params['temp_dir'], f'processed_{uuid.uuid4().hex}.tif')
                         
                         # Use reclassifybytable for BOTH unique and ranges for consistency and robustness
                         table_to_use = []
                         if target_val is not None:
-                            # Create a table for exact match: min=val, max=val, class=1
-                            # Using inclusive bounds (Range boundaries = 2: min <= val <= max)
-                            table_to_use = [target_val, target_val, 1]
+                            if target_tol > 0:
+                                # Use tolerance range: [val, val + tol)
+                                # Note: reclassifybytable usually uses min <= x < max by default? 
+                                # Actually native:reclassifybytable documentation says:
+                                # "The range is min <= value < max" (usually, check docs or defaults)
+                                # Let's assume standard behavior.
+                                # If we want to include the upper bound of the tolerance, we might need to adjust.
+                                # But "amplitud de lo que esta despues" usually implies [val, val+tol).
+                                table_to_use = [target_val, target_val + target_tol, 1]
+                            else:
+                                # Create a table for exact match with small epsilon for floats
+                                # min = val - epsilon, max = val + epsilon, class = 1
+                                epsilon = 1e-5
+                                table_to_use = [target_val - epsilon, target_val + epsilon, 1]
                         else:
                             table_to_use = ranges_table
 
@@ -419,6 +445,9 @@ class RasterValueVectorizer:
                             steps.append('labels')
                             steps.append('min_max')
                             steps.append('range_label')
+                        elif params['method_idx'] == 0:
+                            # For unique values, add 'etiqueta' and 'valor' fields
+                            steps.append('unique_labels')
                         
                         if params['calc_area_m2']: steps.append('m2')
                         if params['calc_area_ha']: steps.append('ha')
@@ -543,6 +572,41 @@ class RasterValueVectorizer:
                                 }, context=context, feedback=feedback)
                                 current_input_vector = step_output
 
+                            elif step == 'unique_labels':
+                                QgsMessageLog.logMessage(f"Agregando etiquetas valores unicos a: {step_output}", "RasterValueVectorizer", Qgis.Info)
+                                # 1. Add 'etiqueta' field = target_label
+                                temp_lbl = os.path.join(params['temp_dir'], f'temp_lbl_{uuid.uuid4().hex}.gpkg')
+                                
+                                # Escape single quotes in label
+                                safe_label = str(target_label).replace("'", "''")
+                                
+                                processing.run("native:fieldcalculator", {
+                                    'INPUT': current_input_vector,
+                                    'FIELD_NAME': 'etiqueta',
+                                    'FIELD_TYPE': 2, # String
+                                    'FIELD_LENGTH': 255,
+                                    'FIELD_PRECISION': 0,
+                                    'FORMULA': f"'{safe_label}'",
+                                    'OUTPUT': temp_lbl
+                                }, context=context, feedback=feedback)
+
+                                # 2. Add 'valor' field = target_val
+                                # target_val is available in the scope of process_one
+                                processing.run("native:fieldcalculator", {
+                                    'INPUT': temp_lbl,
+                                    'FIELD_NAME': 'valor',
+                                    'FIELD_TYPE': 0, # Float
+                                    'FIELD_LENGTH': 20,
+                                    'FIELD_PRECISION': 6,
+                                    'FORMULA': str(target_val),
+                                    'OUTPUT': step_output
+                                }, context=context, feedback=feedback)
+                                
+                                try: os.remove(temp_lbl)
+                                except: pass
+                                
+                                current_input_vector = step_output
+
                             elif step == 'm2':
                                 QgsMessageLog.logMessage(f"Calculando área m2 a: {step_output}", "RasterValueVectorizer", Qgis.Info)
                                 processing.run("native:fieldcalculator", {
@@ -573,13 +637,17 @@ class RasterValueVectorizer:
 
                     # Execution Loop
                     if params['method_idx'] == 0: # Unique Values
-                        for val in params['unique_values']:
+                        for item_data in params['unique_values']:
                             if task.isCanceled(): return None
-                            QgsMessageLog.logMessage(f"Procesando valor: {val}...", "RasterValueVectorizer", Qgis.Info)
+                            val = item_data['val']
+                            lbl = item_data.get('label', 'Valor Unico')
+                            tol = item_data.get('tol', 0.0)
+                            
+                            QgsMessageLog.logMessage(f"Procesando valor: {val} ({lbl}) [Tol: {tol}]...", "RasterValueVectorizer", Qgis.Info)
                             # Clean suffix for filename
                             suffix = f"_{str(val).replace('.', '_')}"
-                            out = process_one(target_val=val, suffix=suffix)
-                            output_layers.append({'path': out, 'name': f"Valor_{val}"})
+                            out = process_one(target_val=val, target_label=lbl, target_tol=tol, suffix=suffix)
+                            output_layers.append({'path': out, 'name': f"{lbl} ({val})"})
                     else: # Ranges
                         if task.isCanceled(): return None
                         QgsMessageLog.logMessage("Procesando rangos...", "RasterValueVectorizer", Qgis.Info)
