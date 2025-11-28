@@ -11,7 +11,7 @@
    </rect>
   </property>
   <property name="windowTitle">
-   <string>Raster Value Vectorizer</string>
+   <string>Raster Value Vectorizer DC</string>
   </property>
   <layout class="QVBoxLayout" name="verticalLayout">
    <item>

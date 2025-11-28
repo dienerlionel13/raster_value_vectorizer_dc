@@ -167,13 +167,13 @@ class RasterValueVectorizer:
             
         self.add_action(
             icon_path,
-            text=self.tr(u'Raster Value Vectorizer'),
+            text=self.tr(u'Raster Value Vectorizer DC'),
             callback=self.run,
             parent=self.iface.mainWindow(),
             add_to_menu=False) # Don't add to default Plugins menu automatically
 
         # Add to Raster Menu
-        self.iface.addPluginToRasterMenu(self.tr(u'&Raster Value Vectorizer'), self.actions[0])
+        self.iface.addPluginToRasterMenu(self.tr(u'&Raster Value Vectorizer DC'), self.actions[0])
 
         # will be set False in run()
         self.first_start = True
@@ -183,7 +183,7 @@ class RasterValueVectorizer:
         """Removes the plugin menu item and icon from QGIS GUI."""
         for action in self.actions:
             self.iface.removePluginRasterMenu(
-                self.tr(u'&Raster Value Vectorizer'),
+                self.tr(u'&Raster Value Vectorizer DC'),
                 action)
             self.iface.removeToolBarIcon(action)
 
