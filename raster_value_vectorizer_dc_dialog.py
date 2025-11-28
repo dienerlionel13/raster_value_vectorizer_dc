@@ -97,18 +97,15 @@ class RasterValueVectorizerDialog(QtWidgets.QDialog, FORM_CLASS):
         
         # Ask for label
         label, ok = QtWidgets.QInputDialog.getText(self, "Etiqueta", f"Ingrese etiqueta para el valor {val}:")
-        if not ok:
-            return # Cancelled
-            
-        if not label:
-            label = "Valor Unico" # Default
+        if not ok or not label:
+            label = "Valor Unico" # Default if cancelled or empty
 
         # Ask for tolerance/range
         tol, ok = QtWidgets.QInputDialog.getDouble(self, "Rango Adicional", 
             f"Ingrese rango adicional para {val} (0 para exacto).\nEjemplo: 0.01 para cubrir {val} hasta {val + 0.01}:", 
             value=0.0, decimals=6)
         if not ok:
-            return # Cancelled
+            tol = 0.0 # Default if cancelled
             
         # Check if already exists (check values stored in UserRole)
         exists = False
@@ -128,6 +125,8 @@ class RasterValueVectorizerDialog(QtWidgets.QDialog, FORM_CLASS):
             # Store data as dict
             item.setData(Qt.UserRole, {'val': val, 'label': label, 'tol': tol})
             self.mListWidgetUnique.addItem(item)
+        else:
+            QtWidgets.QMessageBox.warning(self, "Advertencia", f"El valor {val} ya está en la lista.")
             
     def remove_unique_value(self):
         current_row = self.mListWidgetUnique.currentRow()

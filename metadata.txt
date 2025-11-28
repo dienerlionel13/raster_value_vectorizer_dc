@@ -3,14 +3,14 @@
 # This file should be included when you package your plugin.# Mandatory items:
 
 [general]
-name=RasterValueVectorizer DC
+name=Raster Value Vectorizer DC
 qgisMinimumVersion=3.0
 description=Vectoriza un raster generando polígonos por valor único o rango de valores, ideal para análisis temático y clasificación.
-version=0.1
+version=1.0.0
 author=Diener Chang
 email=dienerchang@aerometricsgt.com
 
-about=RasterValueVectorizer DC es un complemento diseñado para simplificar el proceso de vectorizar un raster por valores únicos o por rangos definidos por el usuario. Su objetivo es ofrecer una herramienta rápida, directa y fácil de usar, reduciendo los pasos que normalmente exige QGIS para convertir celdas de raster en polígonos temáticos. El plugin permite seleccionar el raster, elegir valores o rangos de interés y generar polígonos limpios listos para análisis espacial, clasificación temática o cartografía operativa.
+about=Raster Value Vectorizer DC es un complemento diseñado para simplificar el proceso de vectorizar un raster por valores únicos o por rangos definidos por el usuario. Su objetivo es ofrecer una herramienta rápida, directa y fácil de usar, reduciendo los pasos que normalmente exige QGIS para convertir celdas de raster en polígonos temáticos. El plugin permite seleccionar el raster, elegir valores o rangos de interés y generar polígonos limpios listos para análisis espacial, clasificación temática o cartografía operativa.
 
 tracker=http://bugs
 repository=http://repo
@@ -25,9 +25,9 @@ hasProcessingProvider=no
 # Tags are comma separated with spaces allowed
 tags=Raster, Vector, Processing, Classification, Analysis, Cartography, Geospatial, GIS
 
-homepage=http://homepage
-category=Plugins
-icon=icon.png
+homepage=http://aerometricsgt.com
+category=Raster
+icon=assets/icono.png
 # experimental flag
 experimental=False
 
@@ -40,7 +40,7 @@ deprecated=False
 # plugin_dependencies=
 
 Category of the plugin: Raster, Vector, Database or Web
-# category=
+# category= Raster
 
 # If the plugin can run on QGIS Server.
 server=False

@@ -160,12 +160,20 @@ class RasterValueVectorizer:
     def initGui(self):
         """Create the menu entries and toolbar icons inside the QGIS GUI."""
 
-        icon_path = ':/plugins/raster_value_vectorizer_dc/icon.png'
+        icon_path = os.path.join(self.plugin_dir, 'assets', 'Icono.png')
+        if not os.path.exists(icon_path):
+            # Fallback if asset missing
+            icon_path = ':/plugins/raster_value_vectorizer_dc/icon.png'
+            
         self.add_action(
             icon_path,
             text=self.tr(u'Raster Value Vectorizer'),
             callback=self.run,
-            parent=self.iface.mainWindow())
+            parent=self.iface.mainWindow(),
+            add_to_menu=False) # Don't add to default Plugins menu automatically
+
+        # Add to Raster Menu
+        self.iface.addPluginToRasterMenu(self.tr(u'&Raster Value Vectorizer'), self.actions[0])
 
         # will be set False in run()
         self.first_start = True
@@ -174,8 +182,8 @@ class RasterValueVectorizer:
     def unload(self):
         """Removes the plugin menu item and icon from QGIS GUI."""
         for action in self.actions:
-            self.iface.removePluginMenu(
-                self.tr(u'&RasterValueVectorizer DC'),
+            self.iface.removePluginRasterMenu(
+                self.tr(u'&Raster Value Vectorizer'),
                 action)
             self.iface.removeToolBarIcon(action)
 
@@ -190,7 +198,7 @@ class RasterValueVectorizer:
         from qgis import processing
         from qgis.core import (QgsProject, Qgis, QgsVectorLayer, QgsField, QgsFeature, 
                              QgsTask, QgsApplication, QgsProcessingFeedback, QgsProcessingContext, 
-                             QgsMessageLog, QgsProcessingUtils)
+                             QgsMessageLog, QgsProcessingUtils, QgsCoordinateTransform)
         from qgis.PyQt.QtCore import QVariant, Qt
         from qgis.PyQt.QtWidgets import QMessageBox
 
@@ -209,6 +217,13 @@ class RasterValueVectorizer:
         result = self.dlg.exec_()
         # See if OK was pressed
         if result:
+            # Performance Warning
+            QMessageBox.information(self.dlg, "Información de Rendimiento", 
+                                    "Tenga en cuenta que la velocidad de procesamiento puede estar limitada por el hardware de su PC (RAM, CPU).\n\n"
+                                    "- Rasters de alta resolución o con muchos polígonos pueden tardar más tiempo.\n"
+                                    "- El recorte con máscara y el cálculo de áreas incrementan el tiempo de proceso.\n"
+                                    "- Si la barra de progreso parece detenerse, el proceso sigue activo (especialmente en 'Recortando vectores').")
+
             # 1. Get Inputs
             layer = self.dlg.mMapLayerComboBox.currentData()
             is_temp = self.dlg.mCheckBoxTemp.isChecked()
@@ -258,8 +273,24 @@ class RasterValueVectorizer:
                 layer_source = temp_raster
 
             mask_source = None
+            mask_extent = None
             if use_mask and mask_layer:
                 mask_source = mask_layer.source()
+                # Get extent for raster clipping optimization
+                # Transform extent to Raster CRS if needed
+                rect = mask_layer.extent()
+                mask_crs = mask_layer.crs()
+                raster_crs = layer.crs()
+                
+                if mask_crs != raster_crs:
+                    try:
+                        tr = QgsCoordinateTransform(mask_crs, raster_crs, QgsProject.instance())
+                        rect = tr.transformBoundingBox(rect)
+                    except Exception as e:
+                        self.iface.messageBar().pushMessage("Warning", f"No se pudo transformar la extensión de la máscara: {str(e)}. Se usará la extensión original.", level=Qgis.Warning)
+
+                mask_extent = f"{rect.xMinimum()},{rect.xMaximum()},{rect.yMinimum()},{rect.yMaximum()}"
+                
                 if not os.path.isfile(mask_source):
                     self.iface.messageBar().pushMessage("Info", "Preparando máscara para procesamiento...", level=Qgis.Info)
                     temp_mask = os.path.join(current_temp_dir, 'mask.gpkg')
@@ -273,7 +304,10 @@ class RasterValueVectorizer:
             params = {
                 'layer_source': layer_source, 
                 'layer_crs_authid': layer.crs().authid(),
+                'layer_source': layer_source, 
+                'layer_crs_authid': layer.crs().authid(),
                 'mask_source': mask_source,
+                'mask_extent': mask_extent,
                 'is_temp': is_temp,
                 'output_file_base': output_file_base,
                 'method_idx': method_idx,
@@ -340,25 +374,81 @@ class RasterValueVectorizer:
                             self.iface.messageBar().pushMessage("Error", f"Valores numéricos inválidos en Min/Max en la fila {r+1}", level=Qgis.Critical)
                             return
 
+            # Adjust ranges to close gaps and ensure continuity
+            if method_idx == 1 and params['ranges_table']:
+                # Reconstruct list of dicts for easier manipulation
+                # ranges_table is [min, max, id, min, max, id...]
+                parsed_ranges = []
+                for i in range(0, len(params['ranges_table']), 3):
+                    parsed_ranges.append({
+                        'min': params['ranges_table'][i],
+                        'max': params['ranges_table'][i+1],
+                        'id': params['ranges_table'][i+2]
+                    })
+                
+                # Sort by min value
+                parsed_ranges.sort(key=lambda x: x['min'])
+                
+                # Close gaps
+                for i in range(len(parsed_ranges) - 1):
+                    current_range = parsed_ranges[i]
+                    next_range = parsed_ranges[i+1]
+                    
+                    # If there is a gap (current_max < next_min), close it by extending current_max
+                    if current_range['max'] < next_range['min']:
+                        # We extend the current range up to the start of the next one
+                        # This ensures values like 0.40999 are captured in the first range
+                        current_range['max'] = next_range['min']
+                        
+                        # Update the map as well
+                        params['id_to_max_map'][current_range['id']] = next_range['min']
+
+                # Ensure last range includes its max value (since logic is min <= x < max)
+                parsed_ranges[-1]['max'] += 0.00001
+                params['id_to_max_map'][parsed_ranges[-1]['id']] = parsed_ranges[-1]['max']
+
+                # Rebuild flat list
+                new_ranges_table = []
+                for r in parsed_ranges:
+                    new_ranges_table.extend([r['min'], r['max'], r['id']])
+                params['ranges_table'] = new_ranges_table
+
             # Define the task function
             def run_vectorization(task, params):
                 from qgis import processing
-                from qgis.core import QgsCoordinateReferenceSystem, QgsProcessingContext, QgsProcessingFeedback
+                from qgis.core import QgsCoordinateReferenceSystem, QgsProcessingContext, QgsProcessingFeedback, QgsFields, QgsField
+                import csv
+                import time
                 
-                # Custom feedback class to update task progress
-                class TaskFeedback(QgsProcessingFeedback):
-                    def __init__(self, task):
+                start_time = time.time()
+                
+                # Custom feedback class to update task progress with scaling
+                class ScaledFeedback(QgsProcessingFeedback):
+                    def __init__(self, task, start_percent, end_percent):
                         super().__init__()
                         self.task = task
+                        self.start_percent = start_percent
+                        self.end_percent = end_percent
+                        self.last_reported = -1
                     
                     def setProgress(self, progress):
-                        self.task.setProgress(progress)
+                        # Scale progress from 0-100 to start-end
+                        scaled = self.start_percent + (progress / 100.0) * (self.end_percent - self.start_percent)
+                        
+                        # Throttle updates to avoid UI glitches (update only every 1% or if finished)
+                        if int(scaled) > self.last_reported or progress >= 100:
+                            self.task.setProgress(int(scaled))
+                            self.last_reported = int(scaled)
                         
                     def reportError(self, error, fatalError=False):
-                        QgsMessageLog.logMessage(f"Processing Error: {error}", "RasterValueVectorizer", Qgis.Critical)
+                        if fatalError:
+                            QgsMessageLog.logMessage(f"Processing Error: {error}", "RasterValueVectorizer", Qgis.Critical)
+                        else:
+                            QgsMessageLog.logMessage(f"Processing Warning: {error}", "RasterValueVectorizer", Qgis.Warning)
 
                 try:
-                    feedback = TaskFeedback(task)
+                    # Initial feedback for setup (0-5%)
+                    feedback = ScaledFeedback(task, 0, 5)
                     context = QgsProcessingContext()
                     # Set project instance to ensure ellipsoidal area calculation if available
                     context.setProject(QgsProject.instance())
@@ -366,75 +456,75 @@ class RasterValueVectorizer:
                     task.setProgress(0)
                     QgsMessageLog.logMessage("Iniciando proceso de vectorización...", "RasterValueVectorizer", Qgis.Info)
                     
-                    # Step 0: Clip if needed (once for all)
+                    # Step 0: Clip Raster to Extent (Optimization)
                     input_raster_for_calc = params['layer_source']
                     crs = QgsCoordinateReferenceSystem(params['layer_crs_authid'])
                     
-                    if params['mask_source']:
-                        QgsMessageLog.logMessage("Recortando raster...", "RasterValueVectorizer", Qgis.Info)
-                        # Use UUID to ensure unique temp files
-                        temp_clip = os.path.join(params['temp_dir'], f'clipped_{uuid.uuid4().hex}.tif')
+                    if params['mask_source'] and params['mask_extent']:
+                        QgsMessageLog.logMessage("Recortando raster a la extensión de la máscara (Optimización)...", "RasterValueVectorizer", Qgis.Info)
+                        temp_clip_extent = os.path.join(params['temp_dir'], f'clipped_extent_{uuid.uuid4().hex}.tif')
                         
-                        clip_params = {
+                        # Use gdal:cliprasterbyextent
+                        processing.run("gdal:cliprasterbyextent", {
                             'INPUT': params['layer_source'],
-                            'MASK': params['mask_source'],
-                            'SOURCE_CRS': crs,
-                            'TARGET_CRS': crs,
-                            'KEEP_RESOLUTION': True,
-                            'NODATA': 0,
-                            'ALPHA_BAND': False,
-                            'CROP_TO_CUTLINE': True,
-                            'DATA_TYPE': 0, 
-                            'OUTPUT': temp_clip
-                        }
-                        processing.run("gdal:cliprasterbymasklayer", clip_params, context=context, feedback=feedback)
-                        input_raster_for_calc = temp_clip
+                            'PROJWIN': params['mask_extent'],
+                            'NODATA': None,
+                            'OPTIONS': '',
+                            'DATA_TYPE': 0,
+                            'OUTPUT': temp_clip_extent
+                        }, context=context, feedback=feedback)
+                        
+                        if not os.path.exists(temp_clip_extent):
+                            raise Exception("Falló el recorte del raster por extensión. Verifique que la máscara y el raster se superponen.")
+                            
+                        input_raster_for_calc = temp_clip_extent
                     
                     if task.isCanceled(): return None
 
                     output_layers = []
 
                     # Helper to process one item
-                    def process_one(target_val=None, target_label="Valor Unico", target_tol=0.0, ranges_table=None, suffix=""):
+                    def process_one(target_val=None, target_label="Valor Unico", target_tol=0.0, ranges_table=None, suffix="", start_global=0, end_global=100, desc_prefix=""):
                         temp_processed = os.path.join(params['temp_dir'], f'processed_{uuid.uuid4().hex}.tif')
                         
-                        # Use reclassifybytable for BOTH unique and ranges for consistency and robustness
+                        # Weights
+                        w_reclass = 10
+                        weights = {
+                            'polygonize': 25,
+                            'spatial_index': 5,
+                            'clip_vector': 35,
+                            'join_attributes': 10, 
+                            'calc_areas': 15 
+                        }
+
+                        # Use reclassifybytable
                         table_to_use = []
                         if target_val is not None:
                             if target_tol > 0:
-                                # Use tolerance range: [val, val + tol)
-                                # Note: reclassifybytable usually uses min <= x < max by default? 
-                                # Actually native:reclassifybytable documentation says:
-                                # "The range is min <= value < max" (usually, check docs or defaults)
-                                # Let's assume standard behavior.
-                                # If we want to include the upper bound of the tolerance, we might need to adjust.
-                                # But "amplitud de lo que esta despues" usually implies [val, val+tol).
                                 table_to_use = [target_val, target_val + target_tol, 1]
                             else:
-                                # Create a table for exact match with small epsilon for floats
-                                # min = val - epsilon, max = val + epsilon, class = 1
                                 epsilon = 1e-5
                                 table_to_use = [target_val - epsilon, target_val + epsilon, 1]
                         else:
                             table_to_use = ranges_table
+                        
+                        reclass_end = start_global + (w_reclass / 100.0) * (end_global - start_global)
+                        reclass_feedback = ScaledFeedback(task, start_global, reclass_end)
+                        
+                        task.setDescription(f"{desc_prefix}Clasificando raster...")
 
                         reclass_params = {
                             'INPUT_RASTER': input_raster_for_calc,
                             'RASTER_BAND': 1,
                             'TABLE': table_to_use,
                             'NO_DATA': 0,
-                            'RANGE_BOUNDARIES': 2, # min <= value <= max
-                            'NODATA_FOR_MISSING': True, # Important: everything else becomes nodata
-                            'DATA_TYPE': 5, # Int
+                            'RANGE_BOUNDARIES': 2, 
+                            'NODATA_FOR_MISSING': True,
+                            'DATA_TYPE': 5, 
                             'OUTPUT': temp_processed
                         }
-                        processing.run("native:reclassifybytable", reclass_params, context=context, feedback=feedback)
+                        processing.run("native:reclassifybytable", reclass_params, context=context, feedback=reclass_feedback)
 
-                        # Logic to chain operations and avoid overwriting files in place
-                        # 1. Polygonize -> Temp1
-                        # 2. Calc M2 -> Temp2 (or Final)
-                        # 3. Calc Ha -> Final
-                        
                         # Determine the final destination
                         final_output_path = ""
                         if params['is_temp']:
@@ -448,39 +538,48 @@ class RasterValueVectorizer:
                              final_output_path = os.path.normpath(final_output_path)
 
                         # Determine intermediate steps
-                        steps = ['polygonize']
-                        # Add labeling step if needed (Ranges method)
-                        if params['method_idx'] == 1 and params['id_to_label_map']:
-                            steps.append('labels')
-                            steps.append('min_max')
-                            steps.append('range_label')
-                        elif params['method_idx'] == 0:
-                            # For unique values, add 'etiqueta' and 'valor' fields
-                            steps.append('unique_labels')
+                        steps = ['polygonize', 'spatial_index']
                         
-                        if params['calc_area_m2']: steps.append('m2')
-                        if params['calc_area_ha']: steps.append('ha')
-                        if params['selected_attributes']: steps.append('join_attributes')
+                        if params['mask_source']:
+                            steps.append('clip_vector')
+                            
+                        steps.append('join_attributes')
+                        
+                        if params['calc_area_m2'] or params['calc_area_ha']:
+                            steps.append('calc_areas')
                         
                         current_input_vector = None
                         
+                        total_step_weight = sum(weights.get(s, 5) for s in steps)
+                        progress_remaining_start = reclass_end
+                        progress_remaining_end = end_global
+                        
+                        current_accumulated_weight = 0
+
                         for i, step in enumerate(steps):
                             is_last_step = (i == len(steps) - 1)
                             
+                            step_w = weights.get(step, 5)
+                            s_start = progress_remaining_start + (current_accumulated_weight / total_step_weight) * (progress_remaining_end - progress_remaining_start)
+                            current_accumulated_weight += step_w
+                            s_end = progress_remaining_start + (current_accumulated_weight / total_step_weight) * (progress_remaining_end - progress_remaining_start)
+                            
+                            step_feedback = ScaledFeedback(task, s_start, s_end)
+
                             # Output for this step
                             if is_last_step:
                                 step_output = final_output_path
                             else:
                                 step_output = os.path.join(params['temp_dir'], f'step_{step}_{uuid.uuid4().hex}.gpkg')
                             
-                            # Delete if exists (crucial for the final step if overwriting user file)
                             if os.path.exists(step_output):
-                                try:
-                                    os.remove(step_output)
-                                except:
-                                    pass
-                                    
+                                try: os.remove(step_output)
+                                except: pass
+                                
+                            previous_input = current_input_vector
+
                             if step == 'polygonize':
+                                task.setDescription(f"{desc_prefix}Vectorizando polígonos...")
                                 QgsMessageLog.logMessage(f"Vectorizando a: {step_output}", "RasterValueVectorizer", Qgis.Info)
                                 poly_params = {
                                     'INPUT': temp_processed,
@@ -489,196 +588,142 @@ class RasterValueVectorizer:
                                     'EIGHT_CONNECTEDNESS': False,
                                     'OUTPUT': step_output
                                 }
-                                processing.run("gdal:polygonize", poly_params, context=context, feedback=feedback)
+                                processing.run("gdal:polygonize", poly_params, context=context, feedback=step_feedback)
                                 current_input_vector = step_output
 
-                            elif step == 'labels':
-                                QgsMessageLog.logMessage(f"Aplicando etiquetas a: {step_output}", "RasterValueVectorizer", Qgis.Info)
-                                # Construct CASE WHEN expression
-                                expression_parts = ["CASE"]
-                                for c_id, label in params['id_to_label_map'].items():
-                                    safe_label = str(label).replace("'", "''")
-                                    expression_parts.append(f"WHEN \"class_id\" = {c_id} THEN '{safe_label}'")
-                                expression_parts.append("END")
-                                expression = " ".join(expression_parts)
-
-                                processing.run("native:fieldcalculator", {
-                                    'INPUT': current_input_vector,
-                                    'FIELD_NAME': 'etiqueta',
-                                    'FIELD_TYPE': 2, # String
-                                    'FIELD_LENGTH': 255,
-                                    'FIELD_PRECISION': 0,
-                                    'FORMULA': expression,
-                                    'OUTPUT': step_output
-                                }, context=context, feedback=feedback)
+                            elif step == 'spatial_index':
+                                task.setDescription(f"{desc_prefix}Creando índice espacial...")
+                                QgsMessageLog.logMessage(f"Creando índice espacial...", "RasterValueVectorizer", Qgis.Info)
+                                processing.run("native:createspatialindex", {
+                                    'INPUT': current_input_vector
+                                }, context=context, feedback=step_feedback)
+                                step_output = current_input_vector
                                 current_input_vector = step_output
 
-                            elif step == 'min_max':
-                                QgsMessageLog.logMessage(f"Agregando min/max a: {step_output}", "RasterValueVectorizer", Qgis.Info)
-                                # We need two fields, but field calculator does one at a time.
-                                # To avoid creating too many intermediate files, we can run field calculator twice on the same file?
-                                # No, field calculator creates a new file.
-                                # So we need to split this step or accept more intermediate files.
-                                # Let's do min first, then max. But wait, I added 'min_max' as one step in the list.
-                                # I should have added 'min_val' and 'max_val' separately to the list.
-                                # But to keep the list clean, I'll handle the intermediate file internally here.
+                            elif step == 'clip_vector':
+                                task.setDescription(f"{desc_prefix}Recortando con máscara...")
+                                QgsMessageLog.logMessage(f"Recortando vectores...", "RasterValueVectorizer", Qgis.Info)
                                 
-                                # 1. Min Value
-                                temp_min = os.path.join(params['temp_dir'], f'temp_min_{uuid.uuid4().hex}.gpkg')
-                                expression_parts_min = ["CASE"]
-                                for c_id, val in params['id_to_min_map'].items():
-                                    expression_parts_min.append(f"WHEN \"class_id\" = {c_id} THEN {val}")
-                                expression_parts_min.append("END")
-                                expression_min = " ".join(expression_parts_min)
+                                if params['selected_attributes']:
+                                    processing.run("native:intersection", {
+                                        'INPUT': current_input_vector,
+                                        'OVERLAY': params['mask_source'],
+                                        'INPUT_FIELDS': ['class_id'], 
+                                        'OVERLAY_FIELDS': params['selected_attributes'],
+                                        'OVERLAY_FIELDS_PREFIX': '',
+                                        'OUTPUT': step_output
+                                    }, context=context, feedback=step_feedback)
+                                else:
+                                    processing.run("native:clip", {
+                                        'INPUT': current_input_vector,
+                                        'OVERLAY': params['mask_source'],
+                                        'OUTPUT': step_output
+                                    }, context=context, feedback=step_feedback)
                                 
-                                processing.run("native:fieldcalculator", {
-                                    'INPUT': current_input_vector,
-                                    'FIELD_NAME': 'min_value',
-                                    'FIELD_TYPE': 0, # Float
-                                    'FIELD_LENGTH': 20,
-                                    'FIELD_PRECISION': 6,
-                                    'FORMULA': expression_min,
-                                    'OUTPUT': temp_min
-                                }, context=context, feedback=feedback)
-                                
-                                # 2. Max Value (output to step_output)
-                                expression_parts_max = ["CASE"]
-                                for c_id, val in params['id_to_max_map'].items():
-                                    expression_parts_max.append(f"WHEN \"class_id\" = {c_id} THEN {val}")
-                                expression_parts_max.append("END")
-                                expression_max = " ".join(expression_parts_max)
-                                
-                                processing.run("native:fieldcalculator", {
-                                    'INPUT': temp_min,
-                                    'FIELD_NAME': 'max_value',
-                                    'FIELD_TYPE': 0, # Float
-                                    'FIELD_LENGTH': 20,
-                                    'FIELD_PRECISION': 6,
-                                    'FORMULA': expression_max,
-                                    'OUTPUT': step_output
-                                }, context=context, feedback=feedback)
-                                
-                                # Clean up temp_min
-                                try: os.remove(temp_min)
-                                except: pass
-                                
-                                current_input_vector = step_output
-
-                            elif step == 'range_label':
-                                QgsMessageLog.logMessage(f"Agregando range_label a: {step_output}", "RasterValueVectorizer", Qgis.Info)
-                                # Concatenate min and max
-                                # "min_value" || ' to ' || "max_value"
-                                # But we might want to format them nicely?
-                                # For now, simple concatenation is what was asked: "valor minimo 'to' valor maximo"
-                                
-                                processing.run("native:fieldcalculator", {
-                                    'INPUT': current_input_vector,
-                                    'FIELD_NAME': 'rango',
-                                    'FIELD_TYPE': 2, # String
-                                    'FIELD_LENGTH': 255,
-                                    'FIELD_PRECISION': 0,
-                                    'FORMULA': ' "min_value" || \' to \' || "max_value" ',
-                                    'OUTPUT': step_output
-                                }, context=context, feedback=feedback)
-                                current_input_vector = step_output
-
-                            elif step == 'unique_labels':
-                                QgsMessageLog.logMessage(f"Agregando etiquetas valores unicos a: {step_output}", "RasterValueVectorizer", Qgis.Info)
-                                # 1. Add 'etiqueta' field = target_label
-                                temp_lbl = os.path.join(params['temp_dir'], f'temp_lbl_{uuid.uuid4().hex}.gpkg')
-                                
-                                # Escape single quotes in label
-                                safe_label = str(target_label).replace("'", "''")
-                                
-                                processing.run("native:fieldcalculator", {
-                                    'INPUT': current_input_vector,
-                                    'FIELD_NAME': 'etiqueta',
-                                    'FIELD_TYPE': 2, # String
-                                    'FIELD_LENGTH': 255,
-                                    'FIELD_PRECISION': 0,
-                                    'FORMULA': f"'{safe_label}'",
-                                    'OUTPUT': temp_lbl
-                                }, context=context, feedback=feedback)
-
-                                # 2. Add 'valor' field = target_val
-                                # target_val is available in the scope of process_one
-                                processing.run("native:fieldcalculator", {
-                                    'INPUT': temp_lbl,
-                                    'FIELD_NAME': 'valor',
-                                    'FIELD_TYPE': 0, # Float
-                                    'FIELD_LENGTH': 20,
-                                    'FIELD_PRECISION': 6,
-                                    'FORMULA': str(target_val),
-                                    'OUTPUT': step_output
-                                }, context=context, feedback=feedback)
-                                
-                                try: os.remove(temp_lbl)
-                                except: pass
-                                
-                                current_input_vector = step_output
-
-                            elif step == 'm2':
-                                QgsMessageLog.logMessage(f"Calculando área m2 a: {step_output}", "RasterValueVectorizer", Qgis.Info)
-                                processing.run("native:fieldcalculator", {
-                                    'INPUT': current_input_vector,
-                                    'FIELD_NAME': 'area_m2',
-                                    'FIELD_TYPE': 0, # Float
-                                    'FIELD_LENGTH': 20,
-                                    'FIELD_PRECISION': 6, # Increased precision
-                                    'FORMULA': '$area',
-                                    'OUTPUT': step_output
-                                }, context=context, feedback=feedback)
-                                current_input_vector = step_output
-                                
-                            elif step == 'ha':
-                                QgsMessageLog.logMessage(f"Calculando área ha a: {step_output}", "RasterValueVectorizer", Qgis.Info)
-                                processing.run("native:fieldcalculator", {
-                                    'INPUT': current_input_vector,
-                                    'FIELD_NAME': 'area_ha',
-                                    'FIELD_TYPE': 0, # Float
-                                    'FIELD_LENGTH': 20,
-                                    'FIELD_PRECISION': 4, # Precision 4
-                                    'FORMULA': '$area / 10000',
-                                    'OUTPUT': step_output
-                                }, context=context, feedback=feedback)
                                 current_input_vector = step_output
 
                             elif step == 'join_attributes':
-                                QgsMessageLog.logMessage(f"Uniendo atributos de máscara a: {step_output}", "RasterValueVectorizer", Qgis.Info)
-                                processing.run("native:joinattributesbylocation", {
+                                task.setDescription(f"{desc_prefix}Uniendo atributos...")
+                                QgsMessageLog.logMessage(f"Uniendo atributos...", "RasterValueVectorizer", Qgis.Info)
+                                csv_path = os.path.join(params['temp_dir'], f'attributes_{uuid.uuid4().hex}.csv')
+                                csvt_path = csv_path + "t"
+                                with open(csvt_path, 'w') as f:
+                                    f.write('"Integer","String","Real","Real","String","Real"')
+
+                                with open(csv_path, 'w', newline='', encoding='utf-8') as f:
+                                    writer = csv.writer(f)
+                                    writer.writerow(['class_id', 'etiqueta', 'min_value', 'max_value', 'rango', 'valor'])
+                                    
+                                    if params['method_idx'] == 0: # Unique
+                                        safe_label = target_label
+                                        writer.writerow([1, safe_label, target_val, target_val, f"{target_val}", target_val])
+                                    else: # Ranges
+                                        for c_id, label in params['id_to_label_map'].items():
+                                            min_v = params['id_to_min_map'].get(c_id, 0)
+                                            max_v = params['id_to_max_map'].get(c_id, 0)
+                                            rango_str = f"{min_v} to {max_v}"
+                                            writer.writerow([c_id, label, min_v, max_v, rango_str, ''])
+
+                                processing.run("native:joinattributestable", {
                                     'INPUT': current_input_vector,
-                                    'JOIN': params['mask_source'],
-                                    'PREDICATE': [0], # Intersects
-                                    'JOIN_FIELDS': params['selected_attributes'],
-                                    'METHOD': 1, # Take attributes of the first matching feature
+                                    'FIELD': 'class_id',
+                                    'INPUT_2': csv_path,
+                                    'FIELD_2': 'class_id',
+                                    'FIELDS_TO_COPY': [], 
+                                    'METHOD': 1, 
                                     'DISCARD_NONMATCHING': False,
                                     'PREFIX': '',
                                     'OUTPUT': step_output
-                                }, context=context, feedback=feedback)
+                                }, context=context, feedback=step_feedback)
                                 current_input_vector = step_output
+
+                            elif step == 'calc_areas':
+                                task.setDescription(f"{desc_prefix}Calculando áreas...")
+                                QgsMessageLog.logMessage(f"Calculando áreas...", "RasterValueVectorizer", Qgis.Info)
+                                
+                                calc_steps = []
+                                if params['calc_area_m2']: calc_steps.append(('area_m2', '$area'))
+                                if params['calc_area_ha']: calc_steps.append(('area_ha', '$area / 10000'))
+                                
+                                temp_in = current_input_vector
+                                for idx, (fname, formula) in enumerate(calc_steps):
+                                    is_last_sub = (idx == len(calc_steps) - 1)
+                                    out_sub = step_output if is_last_sub else os.path.join(params['temp_dir'], f'area_tmp_{uuid.uuid4().hex}.gpkg')
+                                    
+                                    processing.run("native:fieldcalculator", {
+                                        'INPUT': temp_in,
+                                        'FIELD_NAME': fname,
+                                        'FIELD_TYPE': 0, 
+                                        'FIELD_LENGTH': 20,
+                                        'FIELD_PRECISION': 6, 
+                                        'FORMULA': formula,
+                                        'OUTPUT': out_sub
+                                    }, context=context, feedback=step_feedback)
+                                    
+                                    if temp_in != current_input_vector and os.path.exists(temp_in):
+                                        try: os.remove(temp_in)
+                                        except: pass
+                                    temp_in = out_sub
+                                
+                                current_input_vector = step_output
+
+                            # Cleanup previous step file
+                            if previous_input and 'step_' in os.path.basename(previous_input) and previous_input != current_input_vector:
+                                try: 
+                                    if os.path.exists(previous_input):
+                                        os.remove(previous_input)
+                                except: pass
 
                         return final_output_path
 
                     # Execution Loop
                     if params['method_idx'] == 0: # Unique Values
-                        for item_data in params['unique_values']:
+                        total_items = len(params['unique_values'])
+                        for idx, item_data in enumerate(params['unique_values']):
                             if task.isCanceled(): return None
                             val = item_data['val']
                             lbl = item_data.get('label', 'Valor Unico')
                             tol = item_data.get('tol', 0.0)
                             
-                            QgsMessageLog.logMessage(f"Procesando valor: {val} ({lbl}) [Tol: {tol}]...", "RasterValueVectorizer", Qgis.Info)
-                            # Clean suffix for filename
+                            QgsMessageLog.logMessage(f"Procesando valor: {val} ({lbl})...", "RasterValueVectorizer", Qgis.Info)
                             suffix = f"_{str(val).replace('.', '_')}"
-                            out = process_one(target_val=val, target_label=lbl, target_tol=tol, suffix=suffix)
+                            
+                            start_p = 5 + (idx / total_items) * 95
+                            end_p = 5 + ((idx + 1) / total_items) * 95
+                            
+                            prefix = f"[{idx+1}/{total_items}] "
+                            
+                            out = process_one(target_val=val, target_label=lbl, target_tol=tol, suffix=suffix, start_global=start_p, end_global=end_p, desc_prefix=prefix)
                             output_layers.append({'path': out, 'name': f"{lbl} ({val})"})
                     else: # Ranges
                         if task.isCanceled(): return None
                         QgsMessageLog.logMessage("Procesando rangos...", "RasterValueVectorizer", Qgis.Info)
-                        out = process_one(ranges_table=params['ranges_table'])
+                        out = process_one(ranges_table=params['ranges_table'], start_global=5, end_global=100, desc_prefix="[Rangos] ")
                         output_layers.append({'path': out, 'name': "Rangos"})
 
-                    return output_layers
+                    end_time = time.time()
+                    duration_min = (end_time - start_time) / 60.0
+                    return {'layers': output_layers, 'duration': duration_min}
 
                 except Exception as e:
                     QgsMessageLog.logMessage(f"Excepción en worker: {str(e)}", "RasterValueVectorizer", Qgis.Critical)
@@ -697,7 +742,11 @@ class RasterValueVectorizer:
                 if result:
                     # Load Results
                     loaded_count = 0
-                    for res in result:
+                    layers_data = result.get('layers', [])
+                    duration = result.get('duration', 0)
+                    
+                    # Reverse order to add them to top correctly if inserting at 0
+                    for res in reversed(layers_data):
                         try:
                             path = res['path']
                             name = res['name']
@@ -705,27 +754,44 @@ class RasterValueVectorizer:
                                 name += " (Temp)"
                             
                             if os.path.exists(path):
-                                final_layer = self.iface.addVectorLayer(path, name, "ogr")
-                                if final_layer and final_layer.isValid():
+                                # Load layer but don't add to legend yet
+                                final_layer = QgsVectorLayer(path, name, "ogr")
+                                if final_layer.isValid():
+                                    QgsProject.instance().addMapLayer(final_layer, False)
+                                    QgsProject.instance().layerTreeRoot().insertLayer(0, final_layer)
                                     loaded_count += 1
                         except Exception as e:
                              QgsMessageLog.logMessage(f"Error cargando capa {res['name']}: {str(e)}", "RasterValueVectorizer", Qgis.Warning)
 
                     if loaded_count > 0:
-                        QMessageBox.information(self.iface.mainWindow(), "Éxito", f"Proceso completado. Se cargaron {loaded_count} capas.")
+                        QMessageBox.information(self.iface.mainWindow(), "Éxito", f"Proceso completado.\nSe cargaron {loaded_count} capas.\nDuración: {duration:.2f} minutos.")
                     else:
                         QMessageBox.warning(self.iface.mainWindow(), "Advertencia", "El proceso terminó pero no se cargaron capas.")
                 else:
                     QMessageBox.warning(self.iface.mainWindow(), "Aviso", "El proceso terminó sin resultados.")
                 
-                # Clean up the temporary directory ONLY if we are NOT using it for the final result
-                if not params['is_temp'] and os.path.exists(params['temp_dir']):
-                    try:
-                        shutil.rmtree(params['temp_dir'])
-                    except:
-                        pass # Best effort
+                # Cleanup Logic
+                if os.path.exists(params['temp_dir']):
+                    if not params['is_temp']:
+                        # If user chose output file, we can delete the whole temp dir
+                        try:
+                            shutil.rmtree(params['temp_dir'])
+                        except:
+                            pass 
+                    else:
+                        # If temp layer, we must KEEP the result files, but we can clean everything else
+                        # Identify result files
+                        layers_data = result.get('layers', []) if result else []
+                        result_paths = [os.path.normpath(r['path']) for r in layers_data]
+                        for root, dirs, files in os.walk(params['temp_dir']):
+                            for f in files:
+                                full_path = os.path.normpath(os.path.join(root, f))
+                                if full_path not in result_paths:
+                                    try:
+                                        os.remove(full_path)
+                                    except:
+                                        pass
 
-            # Create and start the task
             # Create and start the task
             try:
                 task = QgsTask.fromFunction("Vectorizando Raster", run_vectorization, on_finished=on_finished, params=params)
@@ -733,4 +799,3 @@ class RasterValueVectorizer:
                 self.iface.messageBar().pushMessage("Info", "Procesamiento iniciado en segundo plano. Espere...", level=Qgis.Info)
             except Exception as e:
                 QMessageBox.critical(self.iface.mainWindow(), "Error", f"No se pudo iniciar la tarea: {str(e)}")
-
