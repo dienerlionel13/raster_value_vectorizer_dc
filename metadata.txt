@@ -6,15 +6,19 @@
 name=Raster Value Vectorizer DC
 qgisMinimumVersion=3.0
 qgisMaximumVersion=10.0
-description=Vectoriza un raster generando polígonos por valor único o rango de valores, ideal para análisis temático y clasificación.
+description=Vectorizes a raster by generating polygons (en) / Vectoriza un raster generando polígonos por valor único o rangos (es).
 version=1.0.0
 author=Diener Chang
 email=dienerchang@aerometricsgt.com
 
-about=Raster Value Vectorizer DC es un complemento diseñado para simplificar el proceso de vectorizar un raster por valores únicos o por rangos definidos por el usuario. Su objetivo es ofrecer una herramienta rápida, directa y fácil de usar, reduciendo los pasos que normalmente exige QGIS para convertir celdas de raster en polígonos temáticos. El plugin permite seleccionar el raster, elegir valores o rangos de interés y generar polígonos limpios listos para análisis espacial, clasificación temática o cartografía operativa.
+about=Raster Value Vectorizer DC is a plugin designed to simplify the process of vectorizing a raster by unique values or user-defined ranges. It offers a quick, direct, and easy-to-use tool, reducing the steps normally required by QGIS to convert raster cells into thematic polygons.
+ 
+ [Español]
+ Raster Value Vectorizer DC es un complemento diseñado para simplificar el proceso de vectorizar un raster por valores únicos o por rangos definidos por el usuario. Ofrece una herramienta rápida, directa y fácil de usar, reduciendo los pasos que normalmente exige QGIS para convertir celdas de raster en polígonos temáticos.
+ 
 
-tracker=http://bugs
-repository=http://repo
+tracker=https://github.com/dienerchang/raster_value_vectorizer_dc/issues
+repository=https://github.com/dienerchang/raster_value_vectorizer_dc
 # End of mandatory metadata
 
 # Recommended items:
