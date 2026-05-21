@@ -202,6 +202,16 @@ class RasterValueVectorizer:
         from qgis.PyQt.QtCore import QVariant, Qt
         from qgis.PyQt.QtWidgets import QMessageBox
 
+        # Compatibilidad PyQt5 / PyQt6 para enums de Qt
+        Qt_Checked = getattr(Qt, 'Checked', None)
+        if Qt_Checked is None:
+            Qt_Checked = Qt.CheckState.Checked
+
+        Qt_UserRole = getattr(Qt, 'UserRole', None)
+        if Qt_UserRole is None:
+            Qt_UserRole = Qt.ItemDataRole.UserRole
+
+
         # Create the dialog with elements (after translation) and keep reference
         # Only create GUI ONCE in callback, so that it will only load when the plugin is started
         if self.first_start == True:
@@ -214,7 +224,7 @@ class RasterValueVectorizer:
         # show the dialog
         self.dlg.show()
         # Run the dialog event loop
-        result = self.dlg.exec_()
+        result = self.dlg.exec()
         # See if OK was pressed
         if result:
             # Performance Warning
@@ -241,7 +251,7 @@ class RasterValueVectorizer:
             if self.dlg.mCheckBoxCopyAttributes.isChecked():
                 for i in range(self.dlg.mListWidgetAttributes.count()):
                     item = self.dlg.mListWidgetAttributes.item(i)
-                    if item.checkState() == Qt.Checked:
+                    if item.checkState() == Qt_Checked:
                         selected_attributes.append(item.text())
 
             # Validation
@@ -330,7 +340,7 @@ class RasterValueVectorizer:
                     return
                 for i in range(count):
                     item = self.dlg.mListWidgetUnique.item(i)
-                    data = item.data(Qt.UserRole)
+                    data = item.data(Qt_UserRole)
                     
                     if data and isinstance(data, dict):
                         params['unique_values'].append(data)

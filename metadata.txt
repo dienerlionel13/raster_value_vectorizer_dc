@@ -1,10 +1,11 @@
-# This file contains metadata for your plugin.
+    # This file contains metadata for your plugin.
 
 # This file should be included when you package your plugin.# Mandatory items:
 
 [general]
 name=Raster Value Vectorizer DC
 qgisMinimumVersion=3.0
+qgisMaximumVersion=10.0
 description=Vectoriza un raster generando polígonos por valor único o rango de valores, ideal para análisis temático y clasificación.
 version=1.0.0
 author=Diener Chang

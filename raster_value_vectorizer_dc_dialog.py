@@ -6,6 +6,24 @@ from qgis.PyQt import QtWidgets
 from qgis.PyQt.QtCore import Qt
 from qgis.core import QgsProject, QgsRasterLayer, QgsVectorLayer
 
+# Compatibilidad PyQt5 / PyQt6 para enums de Qt
+Qt_ItemIsUserCheckable = getattr(Qt, 'ItemIsUserCheckable', None)
+if Qt_ItemIsUserCheckable is None:
+    Qt_ItemIsUserCheckable = Qt.ItemFlag.ItemIsUserCheckable
+
+Qt_Unchecked = getattr(Qt, 'Unchecked', None)
+if Qt_Unchecked is None:
+    Qt_Unchecked = Qt.CheckState.Unchecked
+
+Qt_Checked = getattr(Qt, 'Checked', None)
+if Qt_Checked is None:
+    Qt_Checked = Qt.CheckState.Checked
+
+Qt_UserRole = getattr(Qt, 'UserRole', None)
+if Qt_UserRole is None:
+    Qt_UserRole = Qt.ItemDataRole.UserRole
+
+
 # This loads your .ui file so that PyQt can populate your plugin with the elements from Qt Designer
 FORM_CLASS, _ = uic.loadUiType(os.path.join(
     os.path.dirname(__file__), 'raster_value_vectorizer_dc_dialog_base.ui'))
@@ -74,8 +92,8 @@ class RasterValueVectorizerDialog(QtWidgets.QDialog, FORM_CLASS):
             fields = layer.fields()
             for field in fields:
                 item = QtWidgets.QListWidgetItem(field.name())
-                item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
-                item.setCheckState(Qt.Unchecked)
+                item.setFlags(item.flags() | Qt_ItemIsUserCheckable)
+                item.setCheckState(Qt_Unchecked)
                 self.mListWidgetAttributes.addItem(item)
 
     def add_range_row(self):
@@ -111,7 +129,7 @@ class RasterValueVectorizerDialog(QtWidgets.QDialog, FORM_CLASS):
         exists = False
         for i in range(self.mListWidgetUnique.count()):
             item = self.mListWidgetUnique.item(i)
-            item_data = item.data(Qt.UserRole)
+            item_data = item.data(Qt_UserRole)
             if item_data and item_data['val'] == val:
                 exists = True
                 break
@@ -123,7 +141,7 @@ class RasterValueVectorizerDialog(QtWidgets.QDialog, FORM_CLASS):
                 
             item = QtWidgets.QListWidgetItem(display_text)
             # Store data as dict
-            item.setData(Qt.UserRole, {'val': val, 'label': label, 'tol': tol})
+            item.setData(Qt_UserRole, {'val': val, 'label': label, 'tol': tol})
             self.mListWidgetUnique.addItem(item)
         else:
             QtWidgets.QMessageBox.warning(self, "Advertencia", f"El valor {val} ya está en la lista.")
