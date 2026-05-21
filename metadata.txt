@@ -17,8 +17,8 @@ about=Raster Value Vectorizer DC is a plugin designed to simplify the process of
  Raster Value Vectorizer DC es un complemento diseñado para simplificar el proceso de vectorizar un raster por valores únicos o por rangos definidos por el usuario. Ofrece una herramienta rápida, directa y fácil de usar, reduciendo los pasos que normalmente exige QGIS para convertir celdas de raster en polígonos temáticos.
  
 
-tracker=https://github.com/dienerchang/raster_value_vectorizer_dc/issues
-repository=https://github.com/dienerchang/raster_value_vectorizer_dc
+tracker=https://github.com/dienerlionel13/raster_value_vectorizer_dc/issues
+repository=https://github.com/dienerlionel13/raster_value_vectorizer_dc
 # End of mandatory metadata
 
 # Recommended items:
